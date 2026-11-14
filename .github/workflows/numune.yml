@@ -1,0 +1,56 @@
+name: Səs nümunəsi
+# Açıq Azərbaycan səs modellərinin (SARA, Meta MMS) keyfiyyət və sürət sınağı: eyni xəbər hər ikisi ilə səslənir,
+# mp3-lər «numune» budağına yazılır, sahib dinləyib seçir. Bir dəfəlik, əl ilə işə salınır.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  numune:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          sparse-checkout: numune/text.txt
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Modellər
+        run: |
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q transformers scipy numpy
+          command -v ffmpeg || { sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null; }
+      - name: Səsləndir
+        run: |
+          mkdir -p out
+          python - <<'PY'
+          import re, time, subprocess, numpy as np, torch, scipy.io.wavfile as wav
+          from transformers import VitsModel, AutoTokenizer
+          text = open("numune/text.txt", encoding="utf-8").read().replace("“", "").replace("”", "").replace("\"", "")
+          parts = [s for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+          for name, repo in [("sara", "BHOSAI/SARA_TTS"), ("mms", "facebook/mms-tts-azj-script_latin")]:
+              tok, m = AutoTokenizer.from_pretrained(repo), VitsModel.from_pretrained(repo)
+              sr, out, t0, first = m.config.sampling_rate, [], time.time(), None
+              for s in parts:
+                  inp = tok(s, return_tensors="pt")
+                  with torch.no_grad():
+                      out.append(m(**inp).waveform[0].numpy())
+                  out.append(np.zeros(int(sr * 0.25), dtype=np.float32))
+                  first = first or time.time() - t0
+              audio = np.concatenate(out)
+              print(f"{name}: ilk cümlə {first:.2f} s, hamısı {time.time() - t0:.1f} s, səs {len(audio) / sr:.1f} s")
+              wav.write(f"out/{name}.wav", sr, audio)
+              subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", f"out/{name}.wav", "-b:a", "64k", f"out/{name}.mp3"], check=True)
+          PY
+      - name: numune budağına yaz
+        env:
+          URL: https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}
+        run: |
+          cd out && rm -f *.wav && git init -q && git checkout -q -b numune
+          git -c user.name=8ulduz-bot -c user.email=bot@8ulduz.az add . && git -c user.name=8ulduz-bot -c user.email=bot@8ulduz.az commit -qm "Səs nümunəsi"
+          git push -q --force "$URL" numune
